@@ -34,12 +34,16 @@ function Test-Tool($name) {
 $useGpp = ($Compiler -eq "g++") -or ($Compiler -eq "auto" -and (Test-Tool g++))
 if ($useGpp) {
     Write-Host "compiling with g++ -> $exe"
+    Remove-Item $exe -Force -ErrorAction SilentlyContinue  # never report a stale binary
     & g++ -std=c++17 -O2 -Wall -o $exe @sources
+    if ($LASTEXITCODE -ne 0) { throw "g++ failed with exit code $LASTEXITCODE" }
 } elseif (Test-Tool cl) {
     Write-Host "compiling with cl.exe -> $exe"
+    Remove-Item $exe -Force -ErrorAction SilentlyContinue
     Push-Location $root
     try {
         & cl /nologo /std:c++17 /O2 /EHsc /Fe:$exe @sources
+        if ($LASTEXITCODE -ne 0) { throw "cl.exe failed with exit code $LASTEXITCODE" }
         Remove-Item *.obj -Force -ErrorAction SilentlyContinue
     } finally {
         Pop-Location

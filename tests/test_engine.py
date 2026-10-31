@@ -52,7 +52,7 @@ def _load_directly():
     module = importlib.util.module_from_spec(spec)
     sys.modules["ctxfold_plugin"] = module
     spec.loader.exec_module(module)
-    return module
+    return importlib.import_module("ctxfold_plugin.engine")
 
 
 def _transcript() -> list[dict]:

@@ -51,10 +51,13 @@ Distilled distillText(const std::string& text, std::size_t maxFacts = 40,
 // The same fact re-distilled yields the same id (upsert = dedupe).
 std::string entryId(const std::string& topic, const std::string& text);
 
-// Relevance of an entry (key + value) to a query, for recall ranking:
-// anchor match x3 + token overlap + (caller adds hits/kind weights).
-double recallScore(const std::string& query, const std::string& entryKey,
-                   const std::string& entryValue);
+// Relevance of a stored entry to a query, for recall ranking:
+// stored-anchor match x3 + token overlap scaled by entry size
+// + 0.15 per prior hit + 0.3 for lessons.
+double recallScore(const std::string& query, const std::string& entryText,
+                   const std::string& entryTopic,
+                   const std::vector<std::string>& entryAnchors, int hits,
+                   const std::string& kind);
 
 }  // namespace cf
 

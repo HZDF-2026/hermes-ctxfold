@@ -14,6 +14,10 @@ anchor lifting, folding, gisting and budget allocation all run locally in a
 worker process over a length-framed protocol. No network, no second model,
 no summary prompt.
 
+It also registers a **memory provider** so the detail compaction drops is
+distilled and recalled instead of forgotten — see
+[Memory](#memory-compaction-stops-meaning-forget).
+
 ```
 built-in:  transcript ──► huge LLM call ──► narrative summary   (seconds, $$)
 ctxfold:   transcript ──► C++ worker     ──► folded/gisted list  (~0.2 s, $0)
@@ -51,6 +55,28 @@ ctxfold:   transcript ──► C++ worker     ──► folded/gisted list  (~0
 * **Fail-open.** Missing or crashed worker → cheap truncation pass, warning in
   the log, conversation continues. A broken plugin never blocks a turn.
 
+## Memory: compaction stops meaning "forget"
+
+The same package also registers a `MemoryProvider`
+(`memory.provider: ctxfold`) built on the ctxfold memory library:
+
+* `on_pre_compress(messages)` — **before** the lossy rewrite, the transcript
+  about to be folded is distilled (facts / lessons / decisions) into the store.
+  This is the recall loop: what compaction drops was already remembered.
+* `prefetch(query)` — relevance-ranked entries are injected before each request
+  (anchor match ×3, token overlap, hit count, lesson bonus). Results are cached,
+  and `queue_prefetch` warms them in the background.
+* `sync_turn` / `on_session_end` — every finished turn (and the full transcript
+  at a real session boundary) is distilled into the store.
+* `ctxfold_recall` / `ctxfold_memory` tools for on-demand recall, stats,
+  `verify` and `curate`.
+
+Storage is plain Markdown in the ctxfold entry format — `MEMORY.md` index plus
+`topics/<topic>.md` shards, entry ids are `sha256(topic + body)[0..12]` so the
+same fact re-distilled is a hit, not a duplicate. Any editor or agent can read
+and edit it; the same directory is readable by the dsh, Pi and Torre di Babele
+ports.
+
 ## Install
 
 ```powershell
@@ -62,11 +88,15 @@ Then in `$HERMES_HOME/config.yaml`:
 
 ```yaml
 context:
-  engine: "ctxfold"
+  engine: "ctxfold"      # deterministic compaction
+
+memory:
+  provider: "ctxfold"    # optional: distill-before-compress + recall
 ```
 
-Hermes never auto-activates plugin engines — the config line above is the
-switch. `hermes plugins` → *Context Engine* should now list `ctxfold`.
+Hermes never auto-activates plugin engines/providers — these config lines are
+the switches. `hermes plugins` → *Context Engine* / *Memory Provider* should
+now list `ctxfold`.
 
 Windows users can use the committed `bin/ctxfold.exe`. On other platforms run
 `./build.ps1` (needs `g++` or `cl.exe`).
@@ -82,6 +112,7 @@ Windows users can use the committed `bin/ctxfold.exe`. On other platforms run
 | `CTXFOLD_GIST_LEN` | `120` | gist length (code points) |
 | `CTXFOLD_TIMEOUT` | `15` | worker timeout, seconds |
 | `CTXFOLD_WORKER` | auto | explicit path to the worker binary |
+| `CTXFOLD_MEMORY_DIR` | `<hermes_home>/ctxfold-memory` | memory library directory |
 
 ## Layout
 
@@ -92,14 +123,17 @@ src/                       C++17 core, zero dependencies
   main.cpp                 worker protocol (length-framed stdin/stdout)
   sha256.h/.cpp            FIPS 180-4 SHA-256 (shared with the other ports)
 plugins/context_engine/ctxfold/
-  __init__.py              Hermes entry point: register(ctx)
+  __init__.py              Hermes entry point: register(ctx) for both seams
   engine.py                ContextEngine subclass + fail-open policy
+  memory_provider.py       MemoryProvider: distill / prefetch / sync_turn
+  store.py                 Markdown authoritative layer (MEMORY.md + topics/)
   worker.py                protocol client (bytes in, plans out — no algorithm)
   plugin.yaml              manifest
   bin/ctxfold.exe          prebuilt worker (Windows)
 tests/
   test_worker.py           worker contract + JS golden parity
   test_engine.py           real Hermes seam: discovery, contract, fail-open
+  test_memory.py           store format, recall, real memory-provider seam
   bench.py                 latency probe for a 2 M-character transcript
 ```
 
@@ -115,6 +149,15 @@ CTXFOLD/1 compress <budget> <toolFold> <head> <tail> <recent> <gistLen> <n>
 → CTXFOLD/1 OK <kept> <tomb> <gisted> <folded> <inTok> <outTok> <anchors>
   keep | tomb | rewrite\t<bytes>\n<content>   × n
   A\t<bytes>\n<anchor>                  × anchors
+```
+
+```
+CTXFOLD/1 recall <queryBytes> <k> <budget>
+  <query>
+  <nEntries>
+  per entry: <hits>\t<kindLen>\t<textLen>\t<topicLen>\t<anchorsLen> + bodies
+→ CTXFOLD/1 OK <picked> <usedTok>
+  <index>\t<cost>                        × picked
 ```
 
 `distill`, `id` and `ping` use the same framing. Message bodies are never
@@ -148,11 +191,11 @@ python -m unittest discover -s tests -v
 
 ## Roadmap
 
-* **Memory recall** — the other half of the story. Hermes's built-in memory is
-  `MEMORY.md`/`USER.md` plus per-turn `prefetch()`; the ctxfold memory library
-  (Markdown authoritative layer + derived index, `distill`/`recall`/`curate`/
-  `verify`) plugs in there as a `MemoryProvider`, so what compaction drops is
-  distilled instead of forgotten.
+* **Curate merge pass.** Today `curate` archives stale zero-hit entries;
+  subset merging (same anchors, high body overlap) is still to come.
+* **Derived index.** Recall scans the in-memory entry set, which is fast for a
+  few thousand entries; a persisted inverted index is the next step for very
+  large libraries.
 
 ## License
 

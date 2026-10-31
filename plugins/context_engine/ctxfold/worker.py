@@ -183,6 +183,42 @@ class Worker:
             {"F": facts, "L": lessons, "D": decisions}[tag].append(body)
         return {"facts": facts, "lessons": lessons, "decisions": decisions}
 
+    def recall(self, query: str, entries, *, k: int = 12, budget: int = 800):
+        """Rank stored memory entries against `query`.
+
+        `entries` is a sequence of dicts with keys ``hits``, ``kind``, ``text``,
+        ``topic``, ``anchors`` (a list of verbatim facts). Returns a list of
+        ``(index, cost_tokens)`` in relevance order, within `budget`.
+        """
+        query_raw = query.encode("utf-8")
+        parts = [
+            (f"{PROTOCOL} recall {len(query_raw)} {int(k)} {int(budget)}\n").encode("utf-8"),
+            query_raw,
+            f"{len(entries)}\n".encode("utf-8"),
+        ]
+        for entry in entries:
+            kind = str(entry.get("kind") or "fact").encode("utf-8")
+            text = str(entry.get("text") or "").encode("utf-8")
+            topic = str(entry.get("topic") or "general").encode("utf-8")
+            anchors = ";".join(str(a) for a in (entry.get("anchors") or [])).encode("utf-8")
+            parts.append(
+                f"{int(entry.get('hits') or 0)}\t{len(kind)}\t{len(text)}\t"
+                f"{len(topic)}\t{len(anchors)}\n".encode("utf-8")
+            )
+            parts.append(kind + text + topic + anchors)
+        reply = self._call(b"".join(parts))
+
+        fields = reply.status.split()
+        if len(fields) != 2:
+            raise WorkerError(f"recall: expected 2 stats, got {reply.status!r}")
+        picked, used = (int(x) for x in fields)
+        out = []
+        for _ in range(picked):
+            line = reply.line()
+            index, _, cost = line.partition("\t")
+            out.append((int(index), int(cost)))
+        return out, used
+
     def entry_id(self, topic: str, text: str) -> str:
         topic_raw = topic.encode("utf-8")
         text_raw = text.encode("utf-8")

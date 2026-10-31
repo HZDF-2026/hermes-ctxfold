@@ -8,6 +8,7 @@
 // Request header (first line):
 //   CTXFOLD/1 compress <budget> <toolFold> <head> <tail> <recent> <gistLen> <n>
 //   CTXFOLD/1 distill  <maxFacts> <maxLessons> <maxDecisions>
+//   CTXFOLD/1 recall   <queryBytes> <k> <budget>   (see handleRecall)
 //   CTXFOLD/1 id       <topicBytes> <textBytes>
 //   CTXFOLD/1 ping
 //
@@ -28,6 +29,7 @@
 // One request per process invocation is the supported mode (stateless, no
 // shared state between host sessions). The loop is kept so a future persistent
 // worker needs no protocol change.
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -176,6 +178,85 @@ void handleId(const std::vector<std::string>& f, Reader& r, std::string& out) {
     out += header() + "OK " + cf::entryId(topic, text) + "\n";
 }
 
+// recall <queryBytes> <k> <budget>
+//   <query>
+//   <nEntries>
+//   per entry: "<hits>\t<kindLen>\t<textLen>\t<topicLen>\t<anchorsLen>\n" + kind + text + topic + anchors
+//   (anchors is the stored anchor list joined by ';')
+// → "OK <picked> <usedTok>" then per pick "<index>\t<cost>"
+//
+// Ranking is the memory layer's contract (see core.h recallScore): anchor
+// match x3, token overlap scaled by entry size, +0.15 per hit, +0.3 for lessons.
+// The caller decides what to do with the picked entries; nothing is rewritten.
+void handleRecall(const std::vector<std::string>& f, Reader& r, std::string& out) {
+    if (f.size() < 5) die("recall: expected <queryBytes> <k> <budget>");
+    std::string query = r.bytes(static_cast<std::size_t>(toLL(f, 2, 0)));
+    const long long k = toLL(f, 3, 12);
+    const long long budget = toLL(f, 4, 800);
+
+    std::vector<std::string> head = splitWs(r.line());
+    if (head.size() != 1) die("recall: malformed entry count");
+    const long long n = std::atoll(head[0].c_str());
+    if (n < 0 || n > 100000) die("recall: bad entry count");
+
+    struct Entry {
+        long long index;
+        int hits;
+        std::string kind;
+        std::string text;
+        std::string topic;
+        std::vector<std::string> anchors;
+        double score;
+    };
+    std::vector<Entry> entries;
+    entries.reserve(static_cast<std::size_t>(n));
+
+    for (long long i = 0; i < n; i++) {
+        std::vector<std::string> parts = splitWs(r.line());
+        if (parts.size() != 5) die("recall: malformed entry header");
+        Entry e;
+        e.index = i;
+        e.hits = static_cast<int>(std::atoll(parts[0].c_str()));
+        e.kind = r.bytes(static_cast<std::size_t>(std::atoll(parts[1].c_str())));
+        e.text = r.bytes(static_cast<std::size_t>(std::atoll(parts[2].c_str())));
+        e.topic = r.bytes(static_cast<std::size_t>(std::atoll(parts[3].c_str())));
+        std::string joined = r.bytes(static_cast<std::size_t>(std::atoll(parts[4].c_str())));
+        std::size_t start = 0;
+        for (std::size_t p = 0; p <= joined.size(); p++) {
+            if (p == joined.size() || joined[p] == ';') {
+                if (p > start) e.anchors.push_back(joined.substr(start, p - start));
+                start = p + 1;
+            }
+        }
+        e.score = cf::recallScore(query, e.text, e.topic, e.anchors, e.hits, e.kind);
+        entries.push_back(std::move(e));
+    }
+
+    std::vector<std::size_t> order(entries.size());
+    for (std::size_t i = 0; i < order.size(); i++) order[i] = i;
+    std::stable_sort(order.begin(), order.end(),
+                     [&entries](std::size_t a, std::size_t b) {
+                         return entries[a].score > entries[b].score;  // ties: input order
+                     });
+
+    std::vector<std::size_t> picked;
+    long long used = 0;
+    for (std::size_t idx : order) {
+        if (static_cast<long long>(picked.size()) >= k) break;
+        if (entries[idx].score <= 0) break;  // sorted: the rest score zero too
+        const long long cost = cf::tok(entries[idx].text) + 10;
+        if (used + cost > budget) continue;
+        picked.push_back(idx);
+        used += cost;
+    }
+
+    out += header() + "OK " + std::to_string(picked.size()) + " " + std::to_string(used) + "\n";
+    for (std::size_t idx : picked) {
+        out += std::to_string(entries[idx].index) + "\t" +
+               std::to_string(cf::tok(entries[idx].text) + 10) + "\n";
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -197,6 +278,7 @@ int main() {
         if (op == "compress") { handleCompress(f, r, out); continue; }
         if (op == "distill") { handleDistill(f, r, out); continue; }
         if (op == "id") { handleId(f, r, out); continue; }
+        if (op == "recall") { handleRecall(f, r, out); continue; }
         die("unknown op: " + op);
     }
     std::fwrite(out.data(), 1, out.size(), stdout);
