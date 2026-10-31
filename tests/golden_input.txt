@@ -1,0 +1,4 @@
+把 handoff.enabled 打开，阈值设为 25000，用 /bin/jq.exe 解析 H:\\pi-work\\config.json。
+构建失败：Permission denied dist/babele.exe——根因是旧进程占用，教训是先 Stop-Process 再重建。
+决定采用 node:sqlite 做派生索引，改用 Markdown 做权威层。
+参见 https://example.com/docs#a1 和提交 a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4。

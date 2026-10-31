@@ -1,0 +1,9 @@
+# build / profiling artifacts
+tests/*.exe
+*.obj
+*.o
+*.pdb
+*.ilk
+__pycache__/
+*.pyc
+.venv*/
